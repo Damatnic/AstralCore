@@ -1,0 +1,9 @@
+{
+  "name": "AstralCore",
+  "description": "An anonymous app for peer-to-peer mental-health support.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "prompt": ""
+}
