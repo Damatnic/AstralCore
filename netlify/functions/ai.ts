@@ -26,15 +26,15 @@ const handler: Handler = async (event: HandlerEvent, context: HandlerContext) =>
         };
     }
     
-    if (!process.env.API_KEY) {
-        console.error('API_KEY is not set in environment variables.');
+    if (!process.env.GEMINI_API_KEY) {
+        console.error('GEMINI_API_KEY is not set in environment variables.');
         return { 
             statusCode: 500, 
             body: JSON.stringify({ message: 'Server configuration error.' }) 
         };
     }
 
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     
     // Transform the incoming message format to the format expected by the Gemini API
     const contents: Content[] = messages.map((msg: AIChatMessage) => ({

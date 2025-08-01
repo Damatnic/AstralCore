@@ -1,5 +1,5 @@
 import React, { createContext, useState, useContext, ReactNode, useEffect, useCallback, useMemo } from 'react';
-import { Auth0Client } from '@auth0/auth0-spa-js';
+import * as AuthSession from 'expo-auth-session';
 import { ApiClient } from '../utils/ApiClient';
 import { Helper } from '../types';
 import { useNotification } from './NotificationContext';
@@ -12,6 +12,10 @@ const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE;
 if (!AUTH0_DOMAIN || !AUTH0_CLIENT_ID || !AUTH0_AUDIENCE) {
     throw new Error("Auth0 configuration is missing. Please set AUTH0_DOMAIN, AUTH0_CLIENT_ID, and AUTH0_AUDIENCE in your environment variables.");
 }
+
+
+// This should match one of the "Allowed Callback URLs" in your Auth0 Application settings
+const REDIRECT_URI = AuthSession.makeRedirectUri();
 
 interface AuthContextType {
   isAuthenticated: boolean;
@@ -39,18 +43,28 @@ export const authState: {
   userToken: null,
 };
 
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// Create Auth0 client
-const auth0Client = new Auth0Client({
-  domain: AUTH0_DOMAIN,
-  clientId: AUTH0_CLIENT_ID,
-  authorizationParams: {
-    audience: AUTH0_AUDIENCE,
-    scope: 'openid profile email',
-    redirect_uri: window.location.origin,
-  },
-});
+// Helper to decode JWT payload.
+const jwtDecode = (token: string) => {
+    try {
+        const base64Url = token.split('.')[1];
+        if (!base64Url) {
+            console.error("Invalid JWT: Missing payload part.");
+            return null;
+        }
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join(''));
+
+        return JSON.parse(jsonPayload);
+    } catch (e) {
+        console.error("Failed to decode JWT", e);
+        return null;
+    }
+};
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<any>(null);
@@ -59,6 +73,21 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [isLoading, setIsLoading] = useState(true);
   const [userToken, setUserToken] = useState<string | null>(null);
   const { addToast } = useNotification();
+
+  const discovery = AuthSession.useAutoDiscovery(`https://${AUTH0_DOMAIN}`);
+
+  const [request, response, promptAsync] = AuthSession.useAuthRequest(
+    {
+      clientId: AUTH0_CLIENT_ID,
+      redirectUri: REDIRECT_URI,
+      responseType: AuthSession.ResponseType.Token,
+      scopes: ['openid', 'profile', 'email'],
+      extraParams: {
+        audience: AUTH0_AUDIENCE,
+      },
+    },
+    discovery
+  );
 
   const fetchHelperProfile = useCallback(async (auth0UserId: string) => {
     if (!auth0UserId) return;
@@ -78,13 +107,16 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   }, []);
 
-  const setAuthData = useCallback(async (accessToken: string | null, userInfo: any = null) => {
-    if (accessToken && userInfo) {
-        setUser(userInfo);
-        if (userInfo?.sub) {
-            await fetchHelperProfile(userInfo.sub);
+  const setAuthData = useCallback(async (accessToken: string | null) => {
+    if (accessToken) {
+        sessionStorage.setItem('accessToken', accessToken);
+        const decodedToken = jwtDecode(accessToken);
+        setUser(decodedToken);
+        if (decodedToken?.sub) {
+            await fetchHelperProfile(decodedToken.sub);
         }
     } else {
+        sessionStorage.removeItem('accessToken');
         setUser(null);
         setHelperProfile(null);
         setIsNewUser(false);
@@ -104,57 +136,57 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const logout = useCallback(async () => {
     setIsLoading(true);
     await setAuthData(null);
-    await auth0Client.logout({
-      logoutParams: {
-        returnTo: window.location.origin,
-      },
-    });
+    if (discovery?.endSessionEndpoint) {
+        const logoutUrl = `${discovery.endSessionEndpoint}?client_id=${AUTH0_CLIENT_ID}&returnTo=${encodeURIComponent(window.location.origin)}`;
+        window.location.assign(logoutUrl);
+    }
+  }, [discovery, setAuthData]);
+
+  useEffect(() => {
+    const loadToken = async () => {
+        setIsLoading(true);
+        try {
+            const storedToken = sessionStorage.getItem('accessToken');
+            if (storedToken) {
+                const decodedToken = jwtDecode(storedToken);
+                // Check if token is valid and not expired
+                if (decodedToken && decodedToken.exp * 1000 > Date.now()) {
+                    await setAuthData(storedToken);
+                } else {
+                    // Token is expired or invalid, clear it
+                    await setAuthData(null);
+                }
+            }
+        } catch (error) {
+            console.error("Critical error during token loading:", error);
+            // Ensure auth state is cleared on any error
+            await setAuthData(null);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+    loadToken();
   }, [setAuthData]);
 
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        setIsLoading(true);
-        
-        // Handle the redirect callback
-        if (window.location.search.includes('code=')) {
-          await auth0Client.handleRedirectCallback();
-          // Clean up the URL
-          window.history.replaceState({}, document.title, window.location.pathname);
-        }
+    if (response?.type === 'success' && response.params.access_token) {
+        setAuthData(response.params.access_token);
+    } else if (response?.type === 'error') {
+        addToast('Authentication error: ' + (response.params.error_description || response.error?.message), 'error');
+        console.error(response.error);
+    }
+  }, [response, setAuthData, addToast]);
 
-        // Check if user is authenticated
-        const isAuthenticated = await auth0Client.isAuthenticated();
-        
-        if (isAuthenticated) {
-          const user = await auth0Client.getUser();
-          const token = await auth0Client.getTokenSilently();
-          await setAuthData(token, user);
-        }
-      } catch (error) {
-        console.error("Authentication initialization error:", error);
-        await setAuthData(null);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    initAuth();
-  }, [setAuthData]);
 
   const login = useCallback(async () => {
-    try {
-      await auth0Client.loginWithRedirect({
-        authorizationParams: {
-          audience: AUTH0_AUDIENCE,
-          scope: 'openid profile email',
-        },
-      });
-    } catch (error) {
-      console.error("Login error:", error);
-      addToast("Authentication failed. Please try again.", 'error');
+    if (!request || !AUTH0_DOMAIN || !AUTH0_CLIENT_ID) {
+        const errorMessage = "Authentication service is not configured correctly.";
+        console.error(errorMessage);
+        addToast(errorMessage, 'error');
+        return;
     }
-  }, [addToast]);
+    await promptAsync();
+  }, [request, promptAsync, addToast]);
 
   // Global listener for auth errors (e.g., 401 Unauthorized)
   useEffect(() => {
@@ -168,6 +200,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         window.removeEventListener('auth-error', handleAuthError);
     };
   }, [logout, addToast]);
+
 
   const reloadProfile = useCallback(async () => {
     if (user?.sub) {

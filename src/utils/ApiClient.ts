@@ -11,6 +11,13 @@ import { Dilemma, AnalysisResult, AIChatMessage, ChatMessage, CrisisResource, Fe
 
 
 /**
+ * Detects if we're in development mode and the backend may not be running
+ */
+const isDevelopmentMode = () => {
+    return import.meta.env.DEV || window.location.hostname === 'localhost';
+};
+
+/**
  * The single source of truth for all backend API calls.
  * @param endpoint The API endpoint to call (e.g., '/dilemmas')
  * @param options Standard fetch options (method, body, etc.)
@@ -19,33 +26,91 @@ const _callApi = async (endpoint: string, options: RequestInit = {}) => {
     // In a real app, the access token would be retrieved from a secure context.
     const token = sessionStorage.getItem('accessToken'); 
 
-    const response = await fetch(`/api${endpoint}`, {
-        ...options,
-        headers: {
-            'Content-Type': 'application/json',
-            ...(token && { 'Authorization': `Bearer ${token}` }),
-            ...options.headers,
-        },
-    });
+    try {
+        const response = await fetch(`/api${endpoint}`, {
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token && { 'Authorization': `Bearer ${token}` }),
+                ...options.headers,
+            },
+        });
 
-    if (response.status === 401) {
-        // Broadcast an event that other parts of the app can listen for.
-        // This is a clean way to handle auth errors globally.
-        window.dispatchEvent(new CustomEvent('auth-error'));
-        throw new Error('Unauthorized');
+        if (response.status === 401) {
+            // Broadcast an event that other parts of the app can listen for.
+            // This is a clean way to handle auth errors globally.
+            window.dispatchEvent(new CustomEvent('auth-error'));
+            throw new Error('Unauthorized');
+        }
+
+        if (!response.ok) {
+            // Check if we're getting an HTML response (404 page) instead of JSON
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('text/html')) {
+                if (isDevelopmentMode()) {
+                    console.warn(`API endpoint ${endpoint} not available. This is expected in development mode without Netlify dev server running.`);
+                    // Return empty mock data for development
+                    return _getMockResponse(endpoint, options.method || 'GET');
+                }
+                throw new Error(`Backend API not available. Please start the Netlify dev server with 'netlify dev'.`);
+            }
+            
+            const errorData = await response.json().catch(() => ({ message: 'An unknown API error occurred.' }));
+            console.error(`API call to ${endpoint} failed with status ${response.status}.`, errorData);
+            throw new Error(errorData.message || `Request failed with status ${response.status}`);
+        }
+
+        if (response.status === 204) {
+            return; // No content to parse
+        }
+        
+        return response.json();
+    } catch (error) {
+        // Handle network errors or other fetch errors
+        if (error instanceof TypeError && error.message.includes('fetch')) {
+            if (isDevelopmentMode()) {
+                console.warn(`Network error calling ${endpoint}. Using mock data for development.`);
+                return _getMockResponse(endpoint, options.method || 'GET');
+            }
+            throw new Error('Network error: Please check your internet connection and try again.');
+        }
+        throw error;
     }
+};
 
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ message: 'An unknown API error occurred.' }));
-        console.error(`API call to ${endpoint} failed with status ${response.status}.`, errorData);
-        throw new Error(errorData.message || `Request failed with status ${response.status}`);
+/**
+ * Provides mock responses for development when backend is not available
+ */
+const _getMockResponse = (endpoint: string, method: string) => {
+    console.log(`🔧 Mock response for ${method} ${endpoint}`);
+    
+    // Mock responses for different endpoints
+    if (endpoint === '/dilemmas' && method === 'GET') {
+        return [];
     }
-
-    if (response.status === 204) {
-        return; // No content to parse
+    if (endpoint.startsWith('/dilemmas/for-you/') && method === 'GET') {
+        return [];
+    }
+    if (endpoint === '/helpers/online-count' && method === 'GET') {
+        return 0;
+    }
+    if (endpoint.startsWith('/users/consent/') && method === 'GET') {
+        return null;
+    }
+    if (endpoint === '/ai/history' && method === 'GET') {
+        return [];
+    }
+    if (endpoint.startsWith('/wellness/') && method === 'GET') {
+        return [];
     }
     
-    return response.json();
+    // Default empty response for GET requests
+    if (method === 'GET') {
+        return [];
+    }
+    
+    // For POST/PUT/DELETE, return a simple success response
+    return { success: true, message: 'Mock response - backend not available' };
 };
 
 // --- Centralized API Client ---

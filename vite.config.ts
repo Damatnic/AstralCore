@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
     // vite config
     define: {
       'process.env': env,
+      global: 'globalThis',
     },
   };
 });
